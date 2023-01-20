@@ -54,11 +54,7 @@ impl Worker {
             Job::Readable => {
                 let mut buf = [0; 4096];
 
-                let (n, _) = match self.udp_socket.try_recv_from(&mut buf) {
-                    Ok(x) => x,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                    Err(e) => return Err(e.into()),
-                };
+                let (n, _) = self.udp_socket.try_recv_from(&mut buf)?;
 
                 if n < 2 {
                     return Err("buffer too short".into());
@@ -70,12 +66,16 @@ impl Worker {
                     return Err("length not matched".into());
                 }
 
-                let incoming = Incoming::deserialize(&buf[2..n]);
+                let incoming = Incoming::deserialize(&buf[2..n])?;
 
-                print!("{incoming:?}");
-
-                Ok(())
+                self.handle_incoming(incoming).await
             }
+        }
+    }
+
+    async fn handle_incoming(&mut self, incoming: Incoming) -> Result<(), Box<dyn Error>> {
+        match incoming {
+            Incoming::Hello { token } => Ok(()),
         }
     }
 }
