@@ -1,42 +1,17 @@
-use std::{collections::HashSet, error::Error, io};
+use std::error::Error;
 
-use tokio::net::UdpSocket;
+use jumong_server::{env, Worker};
+use tokio::net::{TcpListener, UdpSocket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let udp_socket = UdpSocket::bind("0.0.0.0:3001").await?;
+    env::init();
 
-    let mut udp_addrs = HashSet::new();
+    let tcp_listener = TcpListener::bind("0.0.0.0:3000").await?;
 
-    let mut buf = [0; 1024];
+    let udp_socket = UdpSocket::bind("0.0.0.0:3000").await?;
 
-    loop {
-        udp_socket.readable().await?;
+    let worker = Worker::new(tcp_listener, udp_socket);
 
-        let (n, addr) = match udp_socket.try_recv_from(&mut buf) {
-            Ok(x) => x,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        udp_addrs.insert(addr);
-
-        if n == 0 {
-            continue;
-        }
-
-        let buf = &buf[..n];
-
-        match &buf[..2] {
-            [1, 0] => {
-                println!("Yep!");
-            }
-            [2, 0] => {
-                println!("Yep!");
-            }
-            _ => {}
-        }
-    }
+    worker.run().await
 }
