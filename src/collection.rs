@@ -1,4 +1,10 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    collections::{
+        hash_map::{IntoIter, Iter},
+        HashMap,
+    },
+    hash::Hash,
+};
 
 pub struct BiMap<K, V> {
     kv: HashMap<K, V>,
@@ -11,6 +17,14 @@ impl<K, V> BiMap<K, V> {
             kv: HashMap::new(),
             vk: HashMap::new(),
         }
+    }
+
+    pub fn iter(&self) -> Iter<K, V> {
+        self.kv.iter()
+    }
+
+    pub fn into_iter(self) -> IntoIter<K, V> {
+        self.kv.into_iter()
     }
 }
 

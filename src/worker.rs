@@ -9,8 +9,13 @@ use std::{
 };
 
 use crate::{
-    collection::BiMap, http_response::AuthResponse, incoming_packet::Incoming, job::Protocol,
-    net::Reader, outgoing_packet::Outgoing, url::endpoint, Job, Readable, Schedule, ScheduleQueue,
+    collection::BiMap,
+    http_response::AuthResponse,
+    incoming_packet::Incoming,
+    net::{self, Reader},
+    outgoing_packet::Outgoing,
+    url::endpoint,
+    Job, Readable, Schedule, ScheduleQueue,
 };
 
 pub struct Worker {
@@ -70,10 +75,8 @@ impl Worker {
 
     async fn handle_job(&mut self, job: Job) -> Result<(), Box<dyn Error>> {
         match job {
-            Job::AcceptFromTcp(stream, addr) => {
-                let id = addr.to_string();
-
-                self.tcp_streams.insert(id, stream);
+            Job::AcceptFromTcp(stream, _) => {
+                self.waitings.push(stream);
 
                 Ok(())
             }
@@ -214,8 +217,58 @@ impl Worker {
 
                 Ok(())
             }
-            Job::Send(_, _, _) => Ok(()),
-            Job::Broadcast(_, _, _) => Ok(()),
+            Job::SendToTcp(packet, id) => {
+                if let Some(stream) = self.tcp_streams.get(&id) {
+                    let buf = packet.serilaize()?;
+
+                    let buf = net::create_tcp_packet(&buf);
+
+                    stream.try_write(&buf)?;
+
+                    Ok(())
+                } else {
+                    Err("no stream to send".into())
+                }
+            }
+            Job::SendToUdp(packet, id) => {
+                if let Some(addr) = self.udp_addrs.get_by_key(&id) {
+                    let buf = packet.serilaize()?;
+
+                    self.udp_socket.try_send_to(&buf, addr.clone())?;
+
+                    Ok(())
+                } else {
+                    Err("no stream to send".into())
+                }
+            }
+            Job::BroadcastToTcp(packet, ex) => {
+                let buf = packet.serilaize()?;
+
+                let buf = net::create_tcp_packet(&buf);
+
+                for (id, stream) in self.tcp_streams.iter() {
+                    if ex.contains(id) {
+                        continue;
+                    }
+
+                    stream.try_write(&buf)?;
+                }
+
+                Ok(())
+            }
+            Job::BroadcastToUdp(packet, ex) => {
+                let buf = packet.serilaize()?;
+
+                for (id, addr) in self.udp_addrs.iter() {
+                    if ex.contains(id) {
+                        continue;
+                    }
+
+                    self.udp_socket.try_send_to(&buf, addr.clone())?;
+                }
+
+                Ok(())
+            }
         }
     }
 
@@ -241,9 +294,9 @@ impl Worker {
 
                 self.udp_addrs.insert(id.clone(), addr);
 
-                let packet = Outgoing::UdpHello { id: id.clone() };
+                let packet = Outgoing::HelloFromUdp { id: id.clone() };
 
-                let schedule = Schedule::instant(Job::Send(packet, id, Protocol::Tcp));
+                let schedule = Schedule::instant(Job::SendToTcp(packet, id));
 
                 self.schedule_queue.push(schedule);
 
@@ -277,9 +330,9 @@ impl Worker {
 
                 let id = response.id;
 
-                let packet = Outgoing::TcpHello { id: id.clone() };
+                let packet = Outgoing::HelloFromTcp { id: id.clone() };
 
-                let schedule = Schedule::instant(Job::Send(packet, id, Protocol::Tcp));
+                let schedule = Schedule::instant(Job::SendToTcp(packet, id));
 
                 self.schedule_queue.push(schedule);
 

@@ -24,6 +24,15 @@ impl Incoming {
                     token: String::from_utf8_lossy(body).to_string(),
                 })
             }
+            [2, 0] => {
+                if body.len() != 76 {
+                    return Err(format!("invalid size of body").into());
+                }
+
+                Ok(Self::UdpHello {
+                    token: String::from_utf8_lossy(body).to_string(),
+                })
+            }
             n => Err(format!("unexpected packet arrived, {n:?}").into()),
         }
     }

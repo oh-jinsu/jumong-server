@@ -2,11 +2,11 @@ use std::io;
 
 use tokio::net::TcpStream;
 
-pub trait Reader<T> {
-    fn try_read_packet_buf(&self, buf: &mut [u8]) -> io::Result<T>;
+pub trait Reader {
+    fn try_read_packet_buf(&self, buf: &mut [u8]) -> io::Result<usize>;
 }
 
-impl Reader<usize> for TcpStream {
+impl Reader for TcpStream {
     fn try_read_packet_buf(&self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.try_read(&mut buf[..2])?;
 
@@ -36,4 +36,12 @@ impl Reader<usize> for TcpStream {
 
         Ok(n)
     }
+}
+
+pub fn create_tcp_packet(buf: &[u8]) -> Vec<u8> {
+    [
+        &u16::try_from(buf.len()).unwrap().to_le_bytes() as &[u8],
+        buf,
+    ]
+    .concat()
 }

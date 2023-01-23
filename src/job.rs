@@ -4,11 +4,6 @@ use tokio::net::TcpStream;
 
 use crate::outgoing_packet::Outgoing;
 
-pub enum Protocol {
-    Udp,
-    Tcp,
-}
-
 pub enum Job {
     AcceptFromTcp(TcpStream, SocketAddr),
     DropFromWaiting(usize, Option<Box<dyn Error + Sync + Send>>),
@@ -17,6 +12,8 @@ pub enum Job {
     ReadableFromWaiting(usize),
     ReadableFromTcp(String),
     ReadableFromUdp,
-    Send(Outgoing, String, Protocol),
-    Broadcast(Outgoing, HashSet<String>, Protocol),
+    SendToTcp(Outgoing, String),
+    SendToUdp(Outgoing, String),
+    BroadcastToTcp(Outgoing, HashSet<String>),
+    BroadcastToUdp(Outgoing, HashSet<String>),
 }
