@@ -3,8 +3,6 @@ use std::{collections::HashMap, error::Error};
 use futures::future::select_all;
 use tokio::net::TcpStream;
 
-use crate::connection::Connection;
-
 #[async_trait::async_trait]
 pub trait Readable<T> {
     async fn readable(&self) -> Result<T, Box<dyn Error>>;
@@ -33,15 +31,15 @@ impl Readable<usize> for Vec<TcpStream> {
 }
 
 #[async_trait::async_trait]
-impl Readable<String> for HashMap<String, Connection> {
+impl Readable<String> for HashMap<String, TcpStream> {
     async fn readable(&self) -> Result<String, Box<dyn Error>> {
         if self.is_empty() {
             return Err("no waitings".into());
         }
 
-        match select_all(self.iter().map(|(key, conn)| {
+        match select_all(self.iter().map(|(key, stream)| {
             Box::pin(async move {
-                conn.tcp_stream.readable().await?;
+                stream.readable().await?;
 
                 Ok::<&str, Box<dyn Error>>(key)
             })

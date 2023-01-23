@@ -4,19 +4,21 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use std::{
     collections::{BinaryHeap, HashMap},
     error::Error,
+    io,
     net::SocketAddr,
 };
 
 use crate::{
-    connection::Connection, http_response::AuthResponse, incoming_packet::Incoming, job::Protocol,
-    outgoing_packet::Outgoing, url::endpoint, Job, Readable, Schedule, ScheduleQueue,
+    collection::BiMap, http_response::AuthResponse, incoming_packet::Incoming, job::Protocol,
+    net::Reader, outgoing_packet::Outgoing, url::endpoint, Job, Readable, Schedule, ScheduleQueue,
 };
 
 pub struct Worker {
     tcp_listener: TcpListener,
     waitings: Vec<TcpStream>,
-    connections: HashMap<String, Connection>,
+    tcp_streams: HashMap<String, TcpStream>,
     udp_socket: UdpSocket,
+    udp_addrs: BiMap<String, SocketAddr>,
     schedule_queue: BinaryHeap<Schedule<Job>>,
 }
 
@@ -25,8 +27,9 @@ impl Worker {
         Worker {
             tcp_listener,
             waitings: Vec::new(),
-            connections: HashMap::new(),
+            tcp_streams: HashMap::new(),
             udp_socket,
+            udp_addrs: BiMap::new(),
             schedule_queue: BinaryHeap::new(),
         }
     }
@@ -36,7 +39,7 @@ impl Worker {
             let job = self.select_job().await;
 
             if let Err(e) = self.handle_job(job).await {
-                eprintln!("{e}");
+                eprintln!("job failed for {e}");
             }
         }
     }
@@ -53,7 +56,7 @@ impl Worker {
             Ok(i) = self.waitings.readable() => {
                 Job::ReadableFromWaiting(i)
             }
-            Ok(addr) = self.connections.readable() => {
+            Ok(addr) = self.tcp_streams.readable() => {
                 Job::ReadableFromTcp(addr)
             }
             Ok(_) = self.udp_socket.readable() => {
@@ -70,105 +73,45 @@ impl Worker {
             Job::AcceptFromTcp(stream, addr) => {
                 let id = addr.to_string();
 
-                let conn = Connection::new(stream);
-
-                self.connections.insert(id, conn);
+                self.tcp_streams.insert(id, stream);
 
                 Ok(())
             }
-            Job::ReadableFromWaiting(i) => {
-                if let Some(stream) = self.waitings.get(i) {
-                    let mut buf = [0; 2];
+            Job::ReadableFromWaiting(index) => {
+                if let Some(stream) = self.waitings.get(index) {
+                    let mut buf = [0; 4096];
 
-                    let n = stream.try_read(&mut buf)?;
+                    let n = match stream.try_read_packet_buf(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                        Err(e) => {
+                            let job = Job::DropFromWaiting(index, Some(e.into()));
 
-                    if n == 0 {
-                        self.waitings.remove(i);
+                            let schedule = Schedule::instant(job);
 
-                        return Ok(());
-                    }
+                            self.schedule_queue.push(schedule);
 
-                    if n < 2 {
-                        return Err("buffer too short".into());
-                    }
+                            return Ok(());
+                        }
+                    };
 
-                    let len = usize::from(u16::from_le_bytes(buf));
+                    let incoming = match Incoming::deserialize(&buf[..n]) {
+                        Ok(incoming) => incoming,
+                        Err(e) => {
+                            let job = Job::DropFromWaiting(index, Some(e.into()));
 
-                    if len > 4096 {
-                        return Err("packet too big".into());
-                    }
+                            let schedule = Schedule::instant(job);
 
-                    let mut buf = Vec::with_capacity(len);
+                            self.schedule_queue.push(schedule);
 
-                    let n = stream.try_read(&mut buf)?;
+                            return Ok(());
+                        }
+                    };
 
-                    if n == 0 {
-                        self.waitings.remove(i);
+                    if let Err(e) = self.handle_incoming_from_waiting(incoming, index).await {
+                        let job = Job::DropFromWaiting(index, Some(e.into()));
 
-                        return Ok(());
-                    }
-
-                    if n != len {
-                        return Err("length not matched".into());
-                    }
-
-                    let incoming = Incoming::deserialize(&buf)?;
-
-                    if let Err(_) = self.handle_incoming_from_waiting(incoming, i).await {
-                        self.waitings.remove(i);
-
-                        return Ok(());
-                    }
-
-                    Ok(())
-                } else {
-                    Err("no tcp stream".into())
-                }
-            }
-            Job::ReadableFromTcp(id) => {
-                if let Some(conn) = self.connections.get(&id) {
-                    let mut buf = [0; 2];
-
-                    let n = conn.tcp_stream.try_read(&mut buf)?;
-
-                    if n == 0 {
-                        let schedule = Schedule::instant(Job::Drop(id));
-
-                        self.schedule_queue.push(schedule);
-
-                        return Ok(());
-                    }
-
-                    if n < 2 {
-                        return Err("buffer too short".into());
-                    }
-
-                    let len = usize::from(u16::from_le_bytes(buf));
-
-                    if len > 4096 {
-                        return Err("packet too big".into());
-                    }
-
-                    let mut buf = Vec::with_capacity(len);
-
-                    let n = conn.tcp_stream.try_read(&mut buf)?;
-
-                    if n == 0 {
-                        let schedule = Schedule::instant(Job::Drop(id));
-
-                        self.schedule_queue.push(schedule);
-
-                        return Ok(());
-                    }
-
-                    if n != len {
-                        return Err("length not matched".into());
-                    }
-
-                    let incoming = Incoming::deserialize(&buf)?;
-
-                    if let Err(_) = self.handle_incoming_from_tcp(incoming, id.clone()).await {
-                        let schedule = Schedule::instant(Job::Drop(id));
+                        let schedule = Schedule::instant(job);
 
                         self.schedule_queue.push(schedule);
 
@@ -180,32 +123,99 @@ impl Worker {
                     Err("no tcp stream".into())
                 }
             }
-            Job::Drop(id) => {
-                self.connections.remove(&id);
+            Job::ReadableFromTcp(id) => {
+                if let Some(stream) = self.tcp_streams.get(&id) {
+                    let mut buf = [0; 4096];
 
-                Ok(())
+                    let n = match stream.try_read_packet_buf(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                        Err(e) => {
+                            let schedule = Schedule::instant(Job::DropFromTcp(id, Some(e.into())));
+
+                            self.schedule_queue.push(schedule);
+
+                            return Ok(());
+                        }
+                    };
+
+                    let incoming = match Incoming::deserialize(&buf[..n]) {
+                        Ok(incoming) => incoming,
+                        Err(e) => {
+                            let schedule = Schedule::instant(Job::DropFromTcp(id, Some(e)));
+
+                            self.schedule_queue.push(schedule);
+
+                            return Ok(());
+                        }
+                    };
+
+                    if let Err(e) = self.handle_incoming_from_tcp(incoming, id.clone()).await {
+                        let schedule = Schedule::instant(Job::DropFromTcp(id, Some(e)));
+
+                        self.schedule_queue.push(schedule);
+                    }
+
+                    Ok(())
+                } else {
+                    Err("no tcp stream".into())
+                }
             }
             Job::ReadableFromUdp => {
                 let mut buf = [0; 4096];
 
                 let (n, addr) = self.udp_socket.try_recv_from(&mut buf)?;
 
-                if n < 2 {
-                    return Err("buffer too short".into());
+                let incoming = match Incoming::deserialize(&buf[..n]) {
+                    Ok(incoming) => incoming,
+                    Err(e) => {
+                        let schedule = Schedule::instant(Job::DropFromUdp(addr, Some(e.into())));
+
+                        self.schedule_queue.push(schedule);
+
+                        return Ok(());
+                    }
+                };
+
+                if let Err(e) = self.handle_incoming_from_udp(incoming, addr).await {
+                    let schedule = Schedule::instant(Job::DropFromUdp(addr, Some(e)));
+
+                    self.schedule_queue.push(schedule);
                 }
 
-                let len = usize::from(u16::from_le_bytes([buf[0], buf[1]]));
-
-                if n != len {
-                    return Err("length not matched".into());
-                }
-
-                let incoming = Incoming::deserialize(&buf[2..n])?;
-
-                self.handle_incoming_from_udp(incoming, addr).await
+                Ok(())
             }
-            Job::Send(_, _, _) => todo!(),
-            Job::Broadcast(_, _, _) => todo!(),
+            Job::DropFromWaiting(index, e) => {
+                if let Some(e) = e {
+                    eprintln!("waiting dropped for {e:?}");
+                }
+
+                self.waitings.remove(index);
+
+                Ok(())
+            }
+            Job::DropFromTcp(id, e) => {
+                if let Some(e) = e {
+                    eprintln!("tcp stream dropped for {e:?}");
+                }
+
+                self.tcp_streams.remove(&id);
+
+                self.udp_addrs.remove_by_key(&id);
+
+                Ok(())
+            }
+            Job::DropFromUdp(addr, e) => {
+                if let Some(e) = e {
+                    eprintln!("udp addr dropped for {e:?}");
+                }
+
+                self.udp_addrs.remove_by_value(&addr);
+
+                Ok(())
+            }
+            Job::Send(_, _, _) => Ok(()),
+            Job::Broadcast(_, _, _) => Ok(()),
         }
     }
 
@@ -213,9 +223,9 @@ impl Worker {
         &mut self,
         incoming: Incoming,
         addr: SocketAddr,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Sync + Send>> {
         match incoming {
-            Incoming::Hello { token } => {
+            Incoming::UdpHello { token } => {
                 let response = reqwest::Client::new()
                     .get(endpoint("auth"))
                     .header(AUTHORIZATION, format!("Bearer {}", token))
@@ -227,14 +237,19 @@ impl Worker {
                     _ => return Err(response.text().await?.into()),
                 };
 
-                if let Some(conn) = self.connections.get_mut(&response.id) {
-                    let _ = conn.udp_addr.insert(addr);
+                let id = response.id;
 
-                    Ok(())
-                } else {
-                    Err("no connection".into())
-                }
+                self.udp_addrs.insert(id.clone(), addr);
+
+                let packet = Outgoing::UdpHello { id: id.clone() };
+
+                let schedule = Schedule::instant(Job::Send(packet, id, Protocol::Tcp));
+
+                self.schedule_queue.push(schedule);
+
+                Ok(())
             }
+            _ => Ok(()),
         }
     }
 
@@ -242,9 +257,9 @@ impl Worker {
         &mut self,
         incoming: Incoming,
         i: usize,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Sync + Send>> {
         match incoming {
-            Incoming::Hello { token } => {
+            Incoming::TcpHello { token } => {
                 let response = reqwest::Client::new()
                     .get(endpoint("auth"))
                     .header(AUTHORIZATION, format!("Bearer {}", token))
@@ -258,13 +273,11 @@ impl Worker {
 
                 let stream = self.waitings.remove(i);
 
-                let conn = Connection::new(stream);
-
-                self.connections.insert(response.id.clone(), conn);
+                self.tcp_streams.insert(response.id.clone(), stream);
 
                 let id = response.id;
 
-                let packet = Outgoing::Hello { id: id.clone() };
+                let packet = Outgoing::TcpHello { id: id.clone() };
 
                 let schedule = Schedule::instant(Job::Send(packet, id, Protocol::Tcp));
 
@@ -272,16 +285,17 @@ impl Worker {
 
                 Ok(())
             }
+            _ => Ok(()),
         }
     }
 
     async fn handle_incoming_from_tcp(
         &mut self,
         incoming: Incoming,
-        id: String,
-    ) -> Result<(), Box<dyn Error>> {
+        _: String,
+    ) -> Result<(), Box<dyn Error + Sync + Send>> {
         match incoming {
-            _ => todo!(),
+            _ => Ok(()),
         }
     }
 }

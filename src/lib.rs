@@ -2,7 +2,11 @@ pub mod env;
 
 pub mod url;
 
+pub mod net;
+
 pub mod http_response;
+
+pub mod collection;
 
 mod worker;
 
@@ -23,8 +27,6 @@ pub use readable::Readable;
 mod job;
 
 pub use job::Job;
-
-pub mod connection;
 
 mod incoming_packet;
 

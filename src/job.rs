@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::SocketAddr};
+use std::{collections::HashSet, error::Error, net::SocketAddr};
 
 use tokio::net::TcpStream;
 
@@ -11,7 +11,9 @@ pub enum Protocol {
 
 pub enum Job {
     AcceptFromTcp(TcpStream, SocketAddr),
-    Drop(String),
+    DropFromWaiting(usize, Option<Box<dyn Error + Sync + Send>>),
+    DropFromTcp(String, Option<Box<dyn Error + Sync + Send>>),
+    DropFromUdp(SocketAddr, Option<Box<dyn Error + Sync + Send>>),
     ReadableFromWaiting(usize),
     ReadableFromTcp(String),
     ReadableFromUdp,
