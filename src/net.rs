@@ -38,7 +38,7 @@ impl Reader for TcpStream {
     }
 }
 
-pub fn create_tcp_packet(buf: &[u8]) -> Vec<u8> {
+pub fn wrap_tcp_packet(buf: &[u8]) -> Vec<u8> {
     [
         &u16::try_from(buf.len()).unwrap().to_le_bytes() as &[u8],
         buf,
