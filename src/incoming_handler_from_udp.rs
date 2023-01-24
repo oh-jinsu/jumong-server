@@ -1,4 +1,4 @@
-use std::{error::Error, net::SocketAddr};
+use std::{collections::HashSet, error::Error, net::SocketAddr};
 
 use reqwest::{header::AUTHORIZATION, StatusCode};
 
@@ -36,6 +36,42 @@ pub async fn handle_incoming_from_udp(
             context.schedule_queue.push(schedule);
 
             Ok(())
+        }
+        Incoming::UpdateOrigin { origin } => {
+            if let Some(id) = context.udp_addrs.get_by_val(&addr) {
+                let packet = Outgoing::UpdateOrigin {
+                    id: id.to_owned(),
+                    origin,
+                };
+
+                let ex = HashSet::from_iter([id.to_owned()]);
+
+                let schedule = Schedule::instant(Job::BroadcastToUdp(packet, ex));
+
+                context.schedule_queue.push(schedule);
+
+                Ok(())
+            } else {
+                Err("no addr".into())
+            }
+        }
+        Incoming::UpdateRotation { y } => {
+            if let Some(id) = context.udp_addrs.get_by_val(&addr) {
+                let packet = Outgoing::UpdateRotation {
+                    id: id.to_owned(),
+                    y,
+                };
+
+                let ex = HashSet::from_iter([id.to_owned()]);
+
+                let schedule = Schedule::instant(Job::BroadcastToUdp(packet, ex));
+
+                context.schedule_queue.push(schedule);
+
+                Ok(())
+            } else {
+                Err("no addr".into())
+            }
         }
         _ => Ok(()),
     }

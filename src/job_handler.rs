@@ -1,4 +1,4 @@
-use std::{error::Error, io};
+use std::{collections::HashSet, error::Error, io};
 
 use crate::{
     incoming_handler_from_tcp::handle_incoming_from_tcp,
@@ -7,6 +7,7 @@ use crate::{
     incoming_packet::Incoming,
     job::Job,
     net::{wrap_tcp_packet, Reader},
+    outgoing_packet::Outgoing,
     schedule::Schedule,
     Context,
 };
@@ -105,7 +106,11 @@ pub async fn handle(job: Job, context: &mut Context) -> Result<(), Box<dyn Error
         Job::ReadableFromUdp => {
             let mut buf = [0; 4096];
 
-            let (n, addr) = context.udp_socket.try_recv_from(&mut buf)?;
+            let (n, addr) = match context.udp_socket.try_recv_from(&mut buf) {
+                Ok(x) => x,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
 
             let incoming = match Incoming::deserialize(&buf[..n]) {
                 Ok(incoming) => incoming,
@@ -143,6 +148,12 @@ pub async fn handle(job: Job, context: &mut Context) -> Result<(), Box<dyn Error
             context.tcp_streams.remove(&id);
 
             context.udp_addrs.remove_by_key(&id);
+
+            let packet = Outgoing::GoodBye { id };
+
+            let schedule = Schedule::instant(Job::BroadcastToTcp(packet, HashSet::new()));
+
+            context.schedule_queue.push(schedule);
 
             Ok(())
         }

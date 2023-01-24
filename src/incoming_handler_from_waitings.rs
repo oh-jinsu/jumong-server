@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{collections::HashSet, error::Error};
 
 use reqwest::{header::AUTHORIZATION, StatusCode};
 
@@ -27,15 +27,41 @@ pub async fn handle_incoming_from_waitings(
 
             let stream = context.waitings.remove(i);
 
-            context.tcp_streams.insert(response.id.clone(), stream);
-
             let id = response.id;
 
-            let packet = Outgoing::HelloFromTcp { id: id.clone() };
+            {
+                let packet = Outgoing::HelloFromTcp { id: id.clone() };
 
-            let schedule = Schedule::instant(Job::SendToTcp(packet, id));
+                let schedule = Schedule::instant(Job::SendToTcp(packet, id.clone()));
 
-            context.schedule_queue.push(schedule);
+                context.schedule_queue.push(schedule);
+            }
+
+            {
+                let ids = context
+                    .tcp_streams
+                    .keys()
+                    .map(|key| key.to_string())
+                    .collect();
+
+                let packet = Outgoing::Introduce { ids };
+
+                let schedule = Schedule::instant(Job::SendToTcp(packet, id.clone()));
+
+                context.schedule_queue.push(schedule);
+            }
+
+            {
+                let packet = Outgoing::Welcome { id: id.clone() };
+
+                let ex = HashSet::from_iter([id.clone()]);
+
+                let schedule = Schedule::instant(Job::BroadcastToTcp(packet, ex));
+
+                context.schedule_queue.push(schedule);
+            }
+
+            context.tcp_streams.insert(id.clone(), stream);
 
             Ok(())
         }
